@@ -93,6 +93,7 @@ impl PhotocraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         crate::text::installed_fonts::tick(self, ctx);
         monitor_status::poll_frame(self, ctx, frame);
+        crate::panels::assistant::tick(self, ctx);
         // Control requests and persisted preferences can change the language in this frame.
         i18n::sync_context(ctx, &self.session.prefs().interface.language);
         // The runtime's close path, which asks PhotoCraft when the window was asked to close.

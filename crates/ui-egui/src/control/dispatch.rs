@@ -138,6 +138,8 @@ fn execute_command(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRe
         return err(photocraft_engine::command_hints::protocol_method_as_command(id));
     }
     let params = p.get("params").cloned().unwrap_or(json!({}));
+    // During an Assistant reply, its edits share one history step.
+    let params = crate::panels::assistant::tag_edit(app, params);
     let wait = wait_param(p);
     // A control-channel menu click must respect the same modal gate as the native menu.
     // The documented `ui` requests of Camera Raw and the full-window workspaces operate

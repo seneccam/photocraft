@@ -331,6 +331,8 @@ pub struct PhotocraftApp {
     info_samplers: Option<panels::SamplerReadouts>,
     /// Display profile readings (#569).
     monitors: monitor_status::State,
+    /// Window › Assistant: the conversation with Claude and its pins (`panels::assistant`).
+    pub(crate) assistant: panels::assistant::Assistant,
     pub(crate) thumbnail_cache: std::sync::Arc<std::sync::Mutex<crate::home_recent_ui::ThumbnailCache>>,
     /// The canvas tools' own state: every tool family's gesture, hover and option state
     /// (`canvas::tools`).

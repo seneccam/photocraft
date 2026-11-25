@@ -348,7 +348,9 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut View, 
         }
         // The tools run after the controls, which take a press first, and before the picture, which shows the stroke
         // or edit they made from this pass's input.
-        if let Some(input) = tool_pass(&body.env) {
+        // The Assistant takes the canvas while a reply edits the document or a click places a pin.
+        let input = tool_pass(&body.env).filter(|_| !crate::panels::assistant::blocks_canvas(app));
+        if let Some(input) = input {
             // An ⌥-click the window manager took never arrives; say so (alt_grab.rs). Tools run on the document's own canvas only.
             if primary {
                 let (tool, active) = (app.ui.tool, !app.dialog_open());
@@ -538,6 +540,7 @@ fn canvas_controls(
     crate::symmetry_ui::canvas_controls(ui, app, rect);
     crate::perspective_crop_ui::body(app, ui, rect);
     crate::analysis::canvas::body(app, ui, rect);
+    crate::panels::assistant::canvas::overlay(app, ui, rect, space, doc);
     if primary {
         reported.crop = super::tools::crop::show_frame(app, ui, rect);
     }

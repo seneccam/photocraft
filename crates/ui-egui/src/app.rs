@@ -59,6 +59,7 @@ impl PhotocraftApp {
             streams: HashMap::new(),
             info_samplers: None,
             monitors: Default::default(),
+            assistant: Default::default(),
             thumbnail_cache: std::sync::Arc::new(std::sync::Mutex::new(crate::home_recent_ui::ThumbnailCache::default())),
             canvas_tools: Default::default(),
             live_stroke: None,

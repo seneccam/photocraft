@@ -297,7 +297,8 @@ pub fn clipboard_keys(ctx: &egui::Context, typing: bool, raw: &mut egui::RawInpu
 /// screen color picker is open.
 pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let fired = std::mem::take(&mut app.framework.fired);
-    if crate::screen_picker::busy(app) {
+    // No shortcut edits the document while the Assistant's reply does (Esc stops it).
+    if crate::screen_picker::busy(app) || crate::panels::assistant::blocks_shortcuts(app) {
         return;
     }
     crate::shortcut_dispatch::run_fired(app, ctx, &fired);
