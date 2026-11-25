@@ -12,6 +12,7 @@
 pub(crate) mod claude_cli;
 pub(crate) mod canvas;
 pub(crate) mod context;
+pub(crate) mod references;
 mod panel;
 
 pub(crate) use panel::body;
@@ -40,7 +41,7 @@ pub(crate) enum StepState {
 /// One row of the conversation.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Item {
-    User { text: String, pins: usize, canvas: bool },
+    User { text: String, pins: usize, canvas: bool, references: Vec<references::Reference> },
     Reply(String),
     Step { id: String, label: String, state: StepState },
     /// The end of a reply: how to take its edits back, while nothing else changed the document.
@@ -71,6 +72,8 @@ struct Turn {
 /// conversation and a running reply goes on.
 pub(crate) struct Assistant {
     pub input: String,
+    /// Images attached to the next message as inspiration.
+    pub references: Vec<references::Reference>,
     pub items: Vec<Item>,
     pub pins: Vec<Pin>,
     /// The next canvas click places a pin.
@@ -85,6 +88,11 @@ pub(crate) struct Assistant {
     turns: u64,
     /// The model of the running process, to restart it on a change.
     running_model: usize,
+    /// The window connection the running process uses, to restart it when the connection moves.
+    #[cfg(not(target_arch = "wasm32"))]
+    running_bridge: Option<(u16, std::path::PathBuf)>,
+    /// A message waits for the agent connection, which sending turned on.
+    pub(crate) connecting: bool,
     pub(crate) scroll_to_end: bool,
 }
 
@@ -92,6 +100,7 @@ impl Default for Assistant {
     fn default() -> Self {
         Self {
             input: String::new(),
+            references: Vec::new(),
             items: Vec::new(),
             pins: Vec::new(),
             placing_pins: false,
@@ -103,6 +112,9 @@ impl Default for Assistant {
             turn: None,
             turns: 0,
             running_model: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            running_bridge: None,
+            connecting: false,
             scroll_to_end: false,
         }
     }
@@ -201,19 +213,32 @@ editing the open document. Each of their messages starts with a [PhotoCraft cont
 crops around the pins. Edit with the photocraft MCP tools: find command ids with command_list (filter by words, enabled_only), \
 then run them with command_run or command_batch; read the document again with doc_inspect when you need ids. Work on the active \
 document unless asked otherwise. Prefer non-destructive edits (adjustment layers, masks, new layers named for what they do) and \
-change only what was asked. Never save, close, export or overwrite files unless asked. When you are done, answer in two to four \
+change only what was asked. Images the person attached as references are inspiration (style, colour, mood, layout), not part of \
+the document: recreate their look with PhotoCraft's own tools, and say plainly what you can't reproduce. Never save, close, export or overwrite files unless asked. When you are done, answer in two to four \
 plain sentences: what you changed and where, naming pins as \"pin N\". If something can't be done, say so plainly.";
 
-/// Sends the composed message with the document's context.
+/// Sends the composed message with the document's context. With the agent connection off in
+/// Preferences, sending is the consent: it turns the connection on and the message follows as soon
+/// as the window serves it ([`tick`]).
 pub(crate) fn send(app: &mut PhotocraftApp) {
     let text = app.assistant.input.trim().to_owned();
-    if text.is_empty() || app.assistant.busy() || unavailable(app).is_some() {
+    if text.is_empty() || app.assistant.busy() {
         return;
     }
+    match unavailable(app) {
+        None => {}
+        Some(Unavailable::AgentsOff) => {
+            allow_agents(app);
+            app.assistant.connecting = true;
+            return;
+        }
+        Some(_) => return,
+    }
+    app.assistant.connecting = false;
     let doc = app.session.active().map(|st| st.doc.id);
     let pins = app.assistant.pins.iter().filter(|p| Some(p.doc) == doc).count();
     let canvas = app.assistant.send_canvas && doc.is_some();
-    let content = context::message(app, &text, &app.assistant.pins, canvas);
+    let content = context::message(app, &text, &app.assistant.pins, canvas, &app.assistant.references);
     if let Err(error) = deliver(app, content) {
         app.assistant.items.push(Item::Notice(error));
         app.assistant.scroll_to_end = true;
@@ -222,7 +247,8 @@ pub(crate) fn send(app: &mut PhotocraftApp) {
     app.assistant.turns += 1;
     let starts = app.session.documents().iter().map(|d| (d.doc.id, d.history.past_len())).collect();
     app.assistant.turn = Some(Turn { coalesce: format!("assistant-reply-{}", app.assistant.turns), starts });
-    app.assistant.items.push(Item::User { text, pins, canvas });
+    let references = std::mem::take(&mut app.assistant.references);
+    app.assistant.items.push(Item::User { text, pins, canvas, references });
     app.assistant.input.clear();
     app.assistant.placing_pins = false;
     app.assistant.scroll_to_end = true;
@@ -230,8 +256,9 @@ pub(crate) fn send(app: &mut PhotocraftApp) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn deliver(app: &mut PhotocraftApp, content: Value) -> Result<(), String> {
+    let bridge = window_bridge(app).ok_or_else(|| tl!("PhotoCraft's agent connection isn't ready, so Claude can't reach this window yet. Try again in a moment.").to_owned())?;
     let a = &mut app.assistant;
-    if a.process.is_some() && a.running_model != a.model {
+    if a.process.is_some() && (a.running_model != a.model || a.running_bridge.as_ref() != Some(&bridge)) {
         a.process = None;
     }
     if a.process.is_none() {
@@ -243,7 +270,7 @@ fn deliver(app: &mut PhotocraftApp, content: Value) -> Result<(), String> {
         let launch = claude_cli::Launch {
             claude,
             photocraft_cli,
-            config_dir: std::env::var_os("PHOTOCRAFT_CONFIG_DIR").map(Into::into),
+            bridge: bridge.clone(),
             model: MODELS.get(a.model).and_then(|(_, m)| *m).map(str::to_owned),
             resume: a.session_id.clone(),
             system_prompt: SYSTEM_PROMPT.to_owned(),
@@ -255,8 +282,21 @@ fn deliver(app: &mut PhotocraftApp, content: Value) -> Result<(), String> {
             }
         })?);
         a.running_model = a.model;
+        a.running_bridge = Some(bridge);
     }
     a.process.as_mut().map_or(Err(tl!("Claude isn't running").to_owned()), |p| p.send(content))
+}
+
+/// This window's control server: the port its agent link serves on and the file with its token,
+/// as the link published them in the settings folder.
+#[cfg(not(target_arch = "wasm32"))]
+fn window_bridge(app: &PhotocraftApp) -> Option<(u16, std::path::PathBuf)> {
+    use craft::automation::agents::{TOKEN_FILE, read_connection};
+    let port = app.services.agent_link.as_ref()?.status().port?;
+    let dir = app.services.settings_dir.as_deref()?;
+    let published = read_connection(dir).ok().flatten().filter(|c| c.pid == std::process::id() && c.port == port).map(|c| c.token_file);
+    let token = published.unwrap_or_else(|| dir.join(TOKEN_FILE));
+    token.is_file().then_some((port, token))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -267,6 +307,52 @@ fn deliver(_: &mut PhotocraftApp, _: Value) -> Result<(), String> {
 /// The UI context the CLI's reader threads wake.
 #[cfg(not(target_arch = "wasm32"))]
 static WAKE: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Attaches image files the person picks as references for the next message.
+pub(crate) fn add_image_files(app: &mut PhotocraftApp) {
+    let picked = app.pick_files_bytes(|app, files| {
+        for file in files {
+            let attached = file.read().and_then(|(name, bytes)| references::Reference::from_file(&name, &bytes));
+            attach(app, attached);
+        }
+        Ok(Value::Null)
+    });
+    if let Err(error) = picked {
+        app.assistant.items.push(Item::Notice(error));
+    }
+}
+
+/// Attaches the image on the clipboard (a screenshot, an image copied in another app).
+pub(crate) fn paste_image(app: &mut PhotocraftApp) {
+    let read = match app.services.clipboard_get_image.as_mut() {
+        Some(get) => get(),
+        None => Err(tl!("This build can't read images from the clipboard.").to_owned()),
+    };
+    let attached = match read {
+        Ok(Some((w, h, pixels))) => references::Reference::from_rgba(tl!("Pasted image"), w, h, &pixels),
+        Ok(None) => Err(tl!("The clipboard holds no image.").to_owned()),
+        Err(e) => Err(e),
+    };
+    attach(app, attached);
+}
+
+/// Attaches open document `index` as it looks now.
+pub(crate) fn attach_document(app: &mut PhotocraftApp, index: usize) {
+    let Some(st) = app.session.documents().get(index) else { return };
+    let img = photocraft_compose::thumbnail(&st.doc, references::MAX_SIDE);
+    let attached = references::Reference::from_rgba(&st.doc.name, img.width, img.height, &img.pixels);
+    attach(app, attached);
+}
+
+fn attach(app: &mut PhotocraftApp, attached: Result<references::Reference, String>) {
+    match attached {
+        Ok(r) => app.assistant.references.push(r),
+        Err(e) => {
+            app.assistant.items.push(Item::Notice(e));
+            app.assistant.scroll_to_end = true;
+        }
+    }
+}
 
 /// Stops the running reply; the conversation continues with the next message.
 pub(crate) fn stop(app: &mut PhotocraftApp) {
@@ -285,6 +371,7 @@ pub(crate) fn new_chat(app: &mut PhotocraftApp) {
     let a = &mut app.assistant;
     a.items.clear();
     a.pins.clear();
+    a.references.clear();
     a.session_id = None;
 }
 
@@ -340,6 +427,14 @@ pub(crate) fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let events = app.assistant.process.as_ref().map(claude_cli::Process::poll).unwrap_or_default();
         for event in events {
             apply(app, event);
+        }
+    }
+    // The message waiting for the agent connection goes once the window serves it.
+    if app.assistant.connecting {
+        match unavailable(app) {
+            None => send(app),
+            Some(Unavailable::AgentsOff) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            Some(_) => app.assistant.connecting = false,
         }
     }
     if app.assistant.busy() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

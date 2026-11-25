@@ -6,6 +6,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use super::Pin;
+use super::references::Reference;
 use crate::PhotocraftApp;
 
 /// The longest side of the canvas preview.
@@ -16,7 +17,7 @@ pub(crate) const PIN_CROP: u32 = 384;
 const MAX_LAYERS: usize = 80;
 
 /// The message content (Messages API blocks) for `text`, with the context of the active document.
-pub(crate) fn message(app: &PhotocraftApp, text: &str, pins: &[Pin], send_canvas: bool) -> Value {
+pub(crate) fn message(app: &PhotocraftApp, text: &str, pins: &[Pin], send_canvas: bool, references: &[Reference]) -> Value {
     let mut blocks = Vec::new();
     let mut lines = vec!["[PhotoCraft context]".to_owned()];
     let docs = app.session.documents();
@@ -80,6 +81,14 @@ pub(crate) fn message(app: &PhotocraftApp, text: &str, pins: &[Pin], send_canvas
                 }
             }
         }
+    }
+    for r in references {
+        blocks.push(r.block());
+        lines.push(format!(
+            "Image {} is a reference the person attached, \"{}\": inspiration only, not part of the document.",
+            blocks.len(),
+            r.name
+        ));
     }
     lines.push(String::new());
     lines.push(text.to_owned());

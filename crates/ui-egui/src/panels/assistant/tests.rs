@@ -72,11 +72,24 @@ fn the_message_describes_what_the_person_sees() {
     let app = app_with_doc();
     let doc = app.session.active().unwrap().doc.id;
     let pins = [Pin { doc, x: 10.0, y: 20.0 }];
-    let with = context::message(&app, "warm it up", &pins, true);
+    let with = context::message(&app, "warm it up", &pins, true, &[]);
     let blocks = with.as_array().unwrap();
     assert_eq!(blocks.iter().filter(|b| b["type"] == "image").count(), 2, "the canvas and the pin's crop");
     let text = blocks.last().unwrap()["text"].as_str().unwrap();
     assert!(text.contains("64×48") && text.contains("Pin 1 at document pixel (10, 20)") && text.ends_with("warm it up"));
-    let without = context::message(&app, "hi", &pins, false);
+    let without = context::message(&app, "hi", &pins, false, &[]);
     assert!(without.as_array().unwrap().iter().all(|b| b["type"] == "text"));
+}
+
+// An attached reference goes to Claude as its own image, labelled as inspiration that isn't part
+// of the document, and leaves the message box once sent.
+#[test]
+fn a_reference_image_travels_as_inspiration() {
+    let app = app_with_doc();
+    let poster = references::Reference::from_rgba("poster.jpg", 30, 40, &[90u8; 30 * 40 * 4]).unwrap();
+    let blocks = context::message(&app, "make it look like this", &[], false, std::slice::from_ref(&poster));
+    let blocks = blocks.as_array().unwrap();
+    assert_eq!(blocks.iter().filter(|b| b["type"] == "image").count(), 1);
+    let text = blocks.last().unwrap()["text"].as_str().unwrap();
+    assert!(text.contains("\"poster.jpg\"") && text.contains("not part of the document"));
 }

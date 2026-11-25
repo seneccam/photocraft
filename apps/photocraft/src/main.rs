@@ -818,6 +818,7 @@ fn main() -> eframe::Result {
                     craft::automation::agents::AgentLink::new(services::config_dir(), photocraft_engine::build_info::long_version())
                 };
                 app.services.agent_link = Some(link);
+                app.services.settings_dir = services::config_dir();
             }
 
             #[cfg(target_os = "macos")]

@@ -573,6 +573,10 @@ pub struct Services {
     /// tests that don't set it.
     #[cfg(not(target_arch = "wasm32"))]
     pub agent_link: Option<craft::automation::agents::AgentLink>,
+    /// The settings folder the agent link publishes its connection in, so the Assistant can point
+    /// its tools at this window (`panels::assistant`). `None` in tests and launches without one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub settings_dir: Option<std::path::PathBuf>,
     /// The ArtCraft Launcher's agents switch behind the suite's `AI-MCP` flag, watched on its own
     /// thread. `None` is no flag and no launcher (the web, tests that don't set it).
     #[cfg(not(target_arch = "wasm32"))]

@@ -2,7 +2,8 @@
 //! long-running `claude -p` process per conversation, fed user messages as stream-json on stdin and
 //! read as stream-json events on stdout. The CLI runs the model's tool loop and signs in with the
 //! person's own account, so PhotoCraft holds no key. Its only tools are PhotoCraft's own MCP server
-//! (`photocraft-cli mcp`), which reaches this window through the agent connection.
+//! (`photocraft-cli mcp --bridge`), pointed at this window's control server and token, so every
+//! tool call edits this window: never another one, and never a session without a window.
 //!
 //! A reader thread turns each output line into an [`Event`] and wakes the UI; stderr is kept for
 //! the error shown when the process ends early. Dropping the [`Process`] ends it.
@@ -40,8 +41,8 @@ pub(crate) enum Event {
 pub(crate) struct Launch {
     pub claude: PathBuf,
     pub photocraft_cli: PathBuf,
-    /// The app's settings folder, so the MCP server finds this window's connection file.
-    pub config_dir: Option<PathBuf>,
+    /// This window's control server: its loopback port and the file holding its token.
+    pub bridge: (u16, PathBuf),
     /// A model alias or id (`sonnet`, `opus`, ...); `None` is the CLI's default.
     pub model: Option<String>,
     /// The conversation to continue, after a stop or a model change.
@@ -131,16 +132,13 @@ impl Drop for Process {
 }
 
 fn mcp_server(launch: &Launch) -> Value {
-    let mut server = json!({
+    let (port, token_file) = &launch.bridge;
+    json!({
         "type": "stdio",
         "command": launch.photocraft_cli.to_string_lossy(),
-        // Never start a second app: the panel only runs while this window is open.
-        "args": ["mcp", "--when-closed", "error"],
-    });
-    if let Some(dir) = &launch.config_dir {
-        server["env"] = json!({"PHOTOCRAFT_CONFIG_DIR": dir.to_string_lossy()});
-    }
-    server
+        // Straight to this window: a bridge never falls back to a session without one.
+        "args": ["mcp", "--bridge", format!("127.0.0.1:{port}"), "--control-token-file", token_file.to_string_lossy()],
+    })
 }
 
 fn read_events(stdout: std::process::ChildStdout, tx: &Sender<Event>, wake: &(dyn Fn() + Send + Sync), last_err: &Mutex<String>) {
@@ -277,5 +275,16 @@ mod tests {
         assert_eq!(parse(&ok), vec![Event::TurnDone { error: None }]);
         let failed = json!({"type": "result", "subtype": "error_max_turns", "is_error": true});
         assert!(matches!(&parse(&failed)[..], [Event::TurnDone { error: Some(e) }] if e.contains("max_turns")));
+    }
+
+    // The tools always edit this window: the MCP server bridges to its control server and never
+    // looks for another window or falls back to a session without one.
+    #[test]
+    fn the_tools_reach_this_window_only() {
+        let launch = Launch { bridge: (51963, PathBuf::from("/settings/agent-control.token")), ..Launch::default() };
+        let args: Vec<String> = mcp_server(&launch)["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
+        assert_eq!(args[..3], ["mcp", "--bridge", "127.0.0.1:51963"]);
+        assert!(args.windows(2).any(|w| w == ["--control-token-file", "/settings/agent-control.token"]));
+        assert!(!args.iter().any(|a| a == "--headless" || a == "--when-closed"));
     }
 }

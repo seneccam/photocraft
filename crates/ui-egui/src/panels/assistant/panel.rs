@@ -13,12 +13,13 @@ pub(crate) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     ui.spacing_mut().item_spacing.y = 6.0;
     egui::Frame::new().inner_margin(egui::Margin::same(8)).show(ui, |ui| {
-        if let Some(why) = super::unavailable(app) {
-            unavailable(app, ui, &t, why);
+        // An agent connection that's merely off isn't a problem: sending turns it on.
+        if let Some(why) = super::unavailable(app).filter(|why| *why != Unavailable::AgentsOff) {
+            unavailable(ui, &t, why);
             ui.separator();
         }
         context_card(app, ui, &t);
-        let composer_height = 128.0;
+        let composer_height = if app.assistant.references.is_empty() { 128.0 } else { 184.0 };
         let list_height = (ui.available_height() - composer_height).max(80.0);
         ScrollArea::vertical().id_salt("assistant-conversation").max_height(list_height).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             conversation(app, ui, &t);
@@ -31,18 +32,15 @@ pub(crate) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     });
 }
 
-fn unavailable(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens, why: Unavailable) {
+fn unavailable(ui: &mut egui::Ui, t: &Tokens, why: Unavailable) {
     let text = match why {
         #[cfg(target_arch = "wasm32")]
         Unavailable::Web => tl!("The Assistant runs Claude Code on your computer, so it needs the desktop app."),
         Unavailable::NoLink => tl!("This launch of PhotoCraft has no agent connection, so Claude can't edit documents here."),
         Unavailable::LauncherOff => tl!("Claude edits through PhotoCraft's agent connection. Turn on Let AI agents use Craft apps in the ArtCraft Launcher's settings."),
-        Unavailable::AgentsOff => tl!("Claude edits through PhotoCraft's agent connection, which is off."),
+        Unavailable::AgentsOff => tl!("Sending turns on PhotoCraft's agent connection so Claude can edit this window."),
     };
     ui.label(RichText::new(text).color(t.warning));
-    if why == Unavailable::AgentsOff && ui.button(tl!("Let Agents Use PhotoCraft")).clicked() {
-        super::allow_agents(app);
-    }
 }
 
 fn context_card(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
@@ -78,15 +76,33 @@ fn conversation(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     if app.assistant.items.is_empty() {
         ui.label(RichText::new(tl!("Ask Claude to edit the open document. Place pins on the canvas to point at areas, then mention them as pin 1, pin 2…")).color(t.text_faint));
     }
+    // Thumbnails of the references sent with messages, uploaded before the rows borrow them.
+    let ctx = ui.ctx().clone();
+    for item in &mut app.assistant.items {
+        if let Item::User { references, .. } = item {
+            for r in references {
+                let _ = r.texture(&ctx);
+            }
+        }
+    }
     let mut undo = None;
     for item in &app.assistant.items {
         match item {
-            Item::User { text, pins, canvas } => {
+            Item::User { text, pins, canvas, references } => {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     egui::Frame::new().fill(t.accent_soft).corner_radius(t.radius_lg).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                         ui.set_max_width(ui.available_width() * 0.85);
                         ui.vertical(|ui| {
                             ui.label(RichText::new(text).color(t.text));
+                            if !references.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    for r in references {
+                                        if let Some(texture) = r.shown() {
+                                            thumbnail(ui, texture, 48.0).on_hover_text(&r.name);
+                                        }
+                                    }
+                                });
+                            }
                             let mut sent = Vec::new();
                             if *canvas {
                                 sent.push(tl!("canvas image").to_owned());
@@ -157,8 +173,73 @@ fn conversation(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     }
 }
 
+/// A reference's thumbnail at most `side` points on its longer side, named for screen readers.
+fn thumbnail(ui: &mut egui::Ui, texture: &egui::TextureHandle, side: f32) -> egui::Response {
+    let size = texture.size_vec2();
+    let scale = side / size.x.max(size.y).max(1.0);
+    ui.add(egui::Image::new((texture.id(), size * scale)).corner_radius(4.0))
+}
+
+/// The references waiting to go with the next message, each with a button that removes it.
+fn attached(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    if app.assistant.references.is_empty() {
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    let mut remove = None;
+    ui.horizontal_wrapped(|ui| {
+        for (i, r) in app.assistant.references.iter_mut().enumerate() {
+            egui::Frame::new().fill(t.card).stroke(Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(texture) = r.texture(&ctx) {
+                        thumbnail(ui, &texture, 40.0);
+                    }
+                    ui.label(RichText::new(&r.name).small().color(t.text_dim));
+                    let label = crate::i18n::fmt(tl!("Remove {name}"), &[("name", r.name.as_str())]);
+                    if ui.small_button("✕").on_hover_text(&label).clicked() {
+                        remove = Some(i);
+                    }
+                });
+            });
+        }
+    });
+    if let Some(i) = remove {
+        app.assistant.references.remove(i);
+    }
+}
+
+/// Add Image: a file, the clipboard's image, or another open document as it looks now.
+fn add_image_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.menu_button(tl!("Add Image"), |ui| {
+            if ui.button(tl!("Image File…")).clicked() {
+                super::add_image_files(app);
+                ui.close();
+            }
+            if ui.button(tl!("Paste from Clipboard")).clicked() {
+                super::paste_image(app);
+                ui.close();
+            }
+            let active = app.session.active_index();
+            let others: Vec<(usize, String)> =
+                app.session.documents().iter().enumerate().filter(|(i, _)| Some(*i) != active).map(|(i, d)| (i, d.doc.name.clone())).collect();
+            if !others.is_empty() {
+                ui.separator();
+                ui.label(tl!("Open documents"));
+                for (i, name) in others {
+                    if ui.button(name).clicked() {
+                        super::attach_document(app, i);
+                        ui.close();
+                    }
+                }
+            }
+        });
+    });
+}
+
 fn composer(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     let busy = app.assistant.busy();
+    attached(app, ui, t);
     let doc_name = app.session.active().map(|st| st.doc.name.clone());
     let hint = match &doc_name {
         Some(name) => crate::i18n::fmt(tl!("Ask Claude to edit {name}…"), &[("name", name.as_str())]),
@@ -172,8 +253,9 @@ fn composer(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
         app.assistant.input.pop();
     }
     let mut send = enter && !busy;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let has_doc = doc_name.is_some();
+        add_image_menu(app, ui, !busy);
         let pin = ui.add_enabled(has_doc && !busy, egui::Button::selectable(app.assistant.placing_pins, tl!("Place Pins")));
         if pin.clicked() {
             app.assistant.placing_pins = !app.assistant.placing_pins;
@@ -192,13 +274,16 @@ fn composer(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
                     super::stop(app);
                 }
             } else {
-                let ready = !app.assistant.input.trim().is_empty() && super::unavailable(app).is_none();
+                let reachable = matches!(super::unavailable(app), None | Some(Unavailable::AgentsOff));
+                let ready = !app.assistant.input.trim().is_empty() && reachable && !app.assistant.connecting;
                 send |= ui.add_enabled(ready, egui::Button::new(RichText::new(tl!("Send")).color(t.primary_text)).fill(t.primary_bg)).clicked();
             }
         });
     });
     if busy {
         ui.label(RichText::new(tl!("The canvas is locked while Claude works. Esc stops.")).small().color(t.text_faint));
+    } else if app.assistant.connecting {
+        ui.label(RichText::new(tl!("Connecting Claude to this window…")).small().color(t.text_faint));
     }
     if send {
         super::send(app);
